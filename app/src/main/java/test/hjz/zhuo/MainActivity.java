@@ -1,10 +1,14 @@
 package test.hjz.zhuo;
 
+import android.content.ComponentName;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.Message;
+import android.os.Process;
 import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.v7.app.AppCompatActivity;
@@ -23,8 +27,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import test.hjz.zhuo.utils.HtmlCache;
+import test.hjz.zhuo.utils.UrlLoader;
+
 import static android.support.v7.widget.RecyclerView.SCROLL_STATE_DRAGGING;
 import static android.support.v7.widget.RecyclerView.SCROLL_STATE_IDLE;
+import static android.support.v7.widget.RecyclerView.SCROLL_STATE_SETTLING;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -43,9 +51,13 @@ public class MainActivity extends AppCompatActivity {
     private ListAdapter mAdapter;
     private Handler mPreLoadHandler;
     private Handler mUIHandler;
-    private List<Map<String, Object>> datas;
-    private boolean mPreLoadPendind;
-    private boolean mPreLoadSarted;
+    private HandlerThread mWorkThread;
+    private Handler mWorkHandler;
+
+    private ComponentName mWebActivity;
+
+    // when activity recreate,static data can be reserve.
+    private static List<Map<String, Object>> datas;
 
     private static final String[][] TEST_URL = {
             {"baidu", "www.baidu.com"},
@@ -68,8 +80,18 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        mWebActivity = new ComponentName(WebActivity.class.getPackage().getName(), WebActivity.class.getCanonicalName());
+
         mPreLoadHandler = new Handler();
         mUIHandler = new UIHandler();
+
+        // background priority.
+        mWorkThread = new HandlerThread("UrlLoaderThread", Process.THREAD_PRIORITY_BACKGROUND);
+        mWorkThread.start();
+
+        // work looper may be null.
+        mWorkHandler = new WorkHandler(mWorkThread.getLooper());
+
         mListView = findViewById(R.id.list);
         mLayoutManager = new LinearLayoutManager(this);
         mAdapter = new ListAdapter();
@@ -105,7 +127,9 @@ public class MainActivity extends AppCompatActivity {
     class ListAdapter extends RecyclerView.Adapter<Holder> {
 
         public ListAdapter() {
-            datas = createList();
+            if (datas == null){
+                datas = createList();
+            }
         }
 
         @NonNull
@@ -163,6 +187,11 @@ public class MainActivity extends AppCompatActivity {
             item.setOnClickListener(view -> {
                 //todo on item click
                 Toast.makeText(view.getContext(), (String) data.get(KEY_URL), Toast.LENGTH_SHORT).show();
+                //
+                Intent intent = new Intent();
+                intent.putExtra(KEY_URL, (String) data.get(KEY_URL));
+                intent.setComponent(mWebActivity);
+                startActivity(intent);
             });
 
         }
@@ -195,11 +224,11 @@ public class MainActivity extends AppCompatActivity {
 
     class ListOnScrollListener extends OnScrollListener {
         private int lastState = SCROLL_STATE_IDLE;
-        private UrlTask urlTask;
+        private PreLoadReadyTask preLoadTask;
 
         public ListOnScrollListener() {
             super();
-            urlTask = new UrlTask();
+            preLoadTask = new PreLoadReadyTask();
         }
 
         @Override
@@ -209,17 +238,16 @@ public class MainActivity extends AppCompatActivity {
             // can check position preload here,but there is no position message.
             if (newState == SCROLL_STATE_IDLE) {
                 Log.d(TAG, "SCROLL_STATE_IDLE postAtTime 3s");
-                mPreLoadHandler.postAtTime(new UrlTask(), SystemClock.uptimeMillis() + 3000);
+                mPreLoadHandler.postAtTime(preLoadTask, SystemClock.uptimeMillis() + 3000);
 
             } else if (newState == SCROLL_STATE_DRAGGING) {
                 Log.d(TAG, "SCROLL_STATE_DRAGGING cancel postAtTime 3s");
-                // null is remove all callback on this handler.
-                mPreLoadHandler.removeCallbacks(null);
+                mPreLoadHandler.removeCallbacks(preLoadTask);
             }
         }
     }
 
-    class UrlTask implements Runnable {
+    class PreLoadReadyTask implements Runnable {
         @Override
         public void run() {
             //
@@ -232,12 +260,19 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
                 datas.get(i).put(KEY_PRELOAD_STATUS, PRELOAD_STARTED);
+
+
                 Message msg = Message.obtain();
-
-
                 // position = arg1
                 msg.arg1 = i;
-                mUIHandler.sendMessageAtTime(msg, SystemClock.uptimeMillis());
+
+                //todo start preload url
+                // start preload url
+                // mPreLoadHandler is attach on UI Thread.
+                // pass url and position
+                mWorkHandler.post(new PreLoadTask((String) datas.get(i).get(KEY_URL),i));
+
+                mUIHandler.sendMessage(msg);
             }
 
             //mAdapter.notifyDataSetChanged();
@@ -245,12 +280,56 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    class PreLoadTask implements Runnable {
+        private String url;
+        private int pos;
+        public PreLoadTask(String url,int pos){
+            this.url = url;
+            this.pos = pos;
+        }
+        @Override
+        public void run() {
+            if (HtmlCache.get(url) == null) {
+                String ret = UrlLoader.load(url);
+                if (ret != null) {
+                    HtmlCache.put(url, ret);
+                }
+            }
+            //todo url load complete.
+
+            // update preload complete.
+            datas.get(pos).put(KEY_PRELOAD_STATUS, PRELOADED);
+            Message msg = Message.obtain();
+            msg.arg1 = pos;
+
+            // update UI
+            mUIHandler.sendMessage(msg);
+        }
+    }
+
     class UIHandler extends Handler {
         @Override
         public void handleMessage(Message msg) {
             super.handleMessage(msg);
+            // there is in UI Thread.
+            // update the item at pos.
             mAdapter.notifyItemChanged(msg.arg1);
         }
     }
 
+    class WorkHandler extends Handler {
+
+        // init work looper.
+        public WorkHandler(Looper looper) {
+            super(looper);
+        }
+
+        @Override
+        public void handleMessage(Message msg) {
+            super.handleMessage(msg);
+            // there is in Work Thread.
+            // can cancel task.
+
+        }
+    }
 }
